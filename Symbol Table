@@ -1,0 +1,171 @@
+Adding a **Symbol Table** is the crucial step that transforms a simple calculator into a true programming language compiler.
+
+A symbol table is a data structure used by the compiler to keep track of identifiers (like variable names, function names, and classes) along with their metadata (such as their data type, memory location, or value).
+
+To support this, we need to upgrade our **NumLang** language to handle variable assignments (e.g., `x = 5`) and variable access (e.g., `x + 2`).
+
+---
+
+## 1. Upgrading the Lexer & AST
+
+First, we need to recognize variable names (identifiers) and the assignment operator (`=`).
+
+```python
+# New Token Types
+TOKEN_ID     = 'ID'     # For variable names like x, y, my_var
+TOKEN_ASSIGN = 'ASSIGN' # For the '=' operator
+
+# Add these rules to your existing Lexer:
+# Inside get_next_token():
+#   if self.current_char.isalpha(): return self.identifier()
+#   if self.current_char == '=': return Token(TOKEN_ASSIGN)
+
+```
+
+We also introduce two new Abstract Syntax Tree (AST) nodes:
+
+* **AssignNode:** Represents setting a variable (`x = 5`).
+* **VarNode:** Represents reading a variable (`x`).
+
+---
+
+## 2. Implementing the Symbol Table
+
+A basic symbol table acts like a dictionary. However, in production compilers, it also tracks **scope** (global vs. local variables). We will implement a scoped Symbol Table.
+
+```python
+class SymbolTable:
+    def __init__(self, parent=None):
+        self.symbols = {}
+        self.parent = parent  # Links to an outer scope (e.g., global scope)
+
+    def define(self, name, sym_type):
+        """Declare a variable in the current scope."""
+        self.symbols[name] = {
+            'type': sym_type,
+            'address': len(self.symbols) # Simplistic memory offset
+        }
+
+    def lookup(self, name):
+        """Look up a variable, climbing up parent scopes if necessary."""
+        if name in self.symbols:
+            return self.symbols[name]
+        if self.parent:
+            return self.parent.lookup(name)
+        return None
+
+```
+
+---
+
+## 3. The Semantic Analyzer (The Type & Scope Checker)
+
+Before generating code, a compiler runs a **Semantic Analyzer**. This pass walks the AST, populates the Symbol Table, and throws a compile-time error if you try to use a variable that hasn't been declared yet.
+
+```python
+class SemanticAnalyzer:
+    def __init__(self):
+        self.current_scope = SymbolTable()
+
+    def visit(self, node):
+        """Dynamically dispatch to the correct node handler."""
+        method_name = f'visit_{type(node).__name__}'
+        visitor = getattr(self, method_name, self.generic_visit)
+        return visitor(node)
+
+    def generic_visit(self, node):
+        raise Exception(f'No visit_{type(node).__name__} method defined')
+
+    def visit_NumberNode(self, node):
+        return 'INT' # Numbers are implicitly integers
+
+    def visit_BinOpNode(self, node):
+        left_type = self.visit(node.left)
+        right_type = self.visit(node.right)
+        
+        if left_type != 'INT' or right_type != 'INT':
+            raise TypeError("Both operands must be Integers")
+        return 'INT'
+
+    def visit_AssignNode(self, node):
+        var_name = node.var_name
+        expr_type = self.visit(node.expr_node)
+        
+        # Define the variable in our symbol table
+        self.current_scope.define(var_name, expr_type)
+        return expr_type
+
+    def visit_VarNode(self, node):
+        var_name = node.var_name
+        symbol = self.current_scope.lookup(var_name)
+        
+        if symbol is None:
+            raise NameError(f"Compile Error: Variable '{var_name}' is used before assignment.")
+        
+        return symbol['type']
+
+```
+
+---
+
+## 4. Updating the Code Generator
+
+Finally, our stack machine target language needs two new assembly instructions to interact with the variables stored in memory:
+
+* `STORE [var_name]`: Pops the top value off the stack and saves it in the variable.
+* `LOAD [var_name]`: Looks up the variable value and pushes it onto the stack.
+
+```python
+class CodeGenerator:
+    def __init__(self):
+        self.instructions = []
+
+    def generate(self, node):
+        if isinstance(node, NumberNode):
+            self.instructions.append(f"PUSH {node.value}")
+            
+        elif isinstance(node, BinOpNode):
+            self.generate(node.left)
+            self.generate(node.right)
+            op = {TOKEN_PLUS: "ADD", TOKEN_MINUS: "SUB", TOKEN_MUL: "MUL", TOKEN_DIV: "DIV"}[node.op_token.type]
+            self.instructions.append(op)
+            
+        elif isinstance(node, AssignNode):
+            # 1. Evaluate the expression first (puts result on top of stack)
+            self.generate(node.expr_node)
+            # 2. Store that top stack value into the variable name
+            self.instructions.append(f"STORE {node.var_name}")
+            
+        elif isinstance(node, VarNode):
+            # Load the variable value onto the stack
+            self.instructions.append(f"LOAD {node.var_name}")
+            
+        return "\n".join(self.instructions)
+
+```
+
+---
+
+## Compiling Code with Variables
+
+If we pass a multi-line program into our complete compiler pipeline now:
+
+```text
+x = 10
+y = x * 3
+
+```
+
+### The Generated Target Assembly:
+
+```text
+PUSH 10
+STORE x
+LOAD x
+PUSH 3
+MUL
+STORE y
+
+```
+
+If you accidentally compiled `y = z * 3` without declaring `z`, the `SemanticAnalyzer` would block compilation entirely with `NameError: Compile Error: Variable 'z' is used before assignment`, protecting the machine from running broken code.
